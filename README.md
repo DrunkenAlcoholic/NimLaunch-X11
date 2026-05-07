@@ -1,4 +1,14 @@
-# NimLaunch
+# NimLaunch X11
+
+This is the original X11 version of NimLaunch.
+
+This repository is archived and no longer actively maintained.
+
+The current SDL version is available here:
+
+https://github.com/DrunkenAlcoholic/NimLaunch
+
+
 
 Lightning-fast, X11-native application and command launcher written in Nim.
 Pure Xlib/Xft rendering, instant fuzzy search, rich themes, and zero toolkit
