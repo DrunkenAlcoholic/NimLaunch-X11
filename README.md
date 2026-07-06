@@ -2,17 +2,18 @@
 
 This is the original X11 version of NimLaunch.
 
-This repository is archived and no longer actively maintained.
-
-The current SDL version is available here:
+The main SDL version is available here:
 
 https://github.com/DrunkenAlcoholic/NimLaunch
 
+This X11 branch is kept for users who prefer a small Xlib/Xft launcher with
+minimal runtime dependencies on traditional X11 desktops and window managers.
 
 
-Lightning-fast, X11-native application and command launcher written in Nim.
-Pure Xlib/Xft rendering, instant fuzzy search, rich themes, and zero toolkit
-dependencies.
+
+Lightning-fast, X11-native application and command launcher written in Nim. Pure
+Xlib/Xft rendering, instant fuzzy search, rich themes, and no GTK/Qt dependency.
+Optional icon rendering can be enabled at build time with Imlib2.
 
 ![NimLaunch screenshot](Screenshot.gif)
 
@@ -27,6 +28,10 @@ dependencies.
 - **Small & native** – no GTK/Qt; just Nim, Xlib, and Xft.
 - **Smart filesystem search** – `:s` uses `fd` when available, falls back to
   `locate`, then a bounded walk under `$HOME`.
+- **Desktop actions** – searchable `.desktop` actions such as “New Window” or
+  “Private Window” appear as `App: Action` results when the app declares them.
+- **Optional icons** – app icon names are cached from `.desktop` files; default
+  builds stay text-only, while `-d:icons` builds render icons with Imlib2.
 - **Themeable** – 25+ bundled themes with instant `:t` preview and easy TOML tweaks.
 - **Single-instance guard** – second launch exits immediately instead of
   spawning duplicate windows.
@@ -37,28 +42,44 @@ dependencies.
 
 ### Prebuilt binary
 
-Download the latest release from
-[`releases/`](https://github.com/DrunkenAlcoholic/NimLaunch/releases) and run
-`./bin/nimlaunch`. Ensure your system provides the `libX11` and `libXft`
-shared libraries (Wayland sessions require XWayland).
+Download the latest release from this repository and run `./bin/nimlaunch-x11`.
+Ensure your system provides the `libX11` and `libXft` shared libraries. Icon
+enabled binaries additionally need `libImlib2`. Wayland sessions require
+XWayland.
 
 ### Build from source
 
 ```bash
-git clone https://github.com/DrunkenAlcoholic/NimLaunch.git
-cd NimLaunch
+git clone https://github.com/DrunkenAlcoholic/NimLaunch-X11.git
+cd NimLaunch-X11
 nimble install --depsOnly # optional: install dependencies declared in the nimble file
-nimble release           # produces ./bin/nimlaunch
-./bin/nimlaunch
+nimble release           # produces ./bin/nimlaunch-x11
+./bin/nimlaunch-x11
 ```
 
 Dependencies:
 
 - **Nim toolchain** – install via [choosenim](https://nim-lang.org/install_unix.html)
   or your package manager.
-- **Development headers** – `libx11` and `libxft` (`libx11-dev libxft-dev` on
-  Debian/Ubuntu; `libx11 libxft` on Arch/Manjaro).
+- **Runtime libraries** – `libX11` and `libXft` for all builds; `Imlib2` only
+  for icon-enabled binaries.
+- **Development headers** – `libx11` and `libxft` headers for compiling; add
+  Imlib2 headers for icon builds.
 - **Nim packages** – already covered by `nimble install` above (`parsetoml`, `x11`).
+
+Common package names:
+
+| Distro | Default build deps | Icon build extra | Runtime |
+| ------ | ------------------ | ---------------- | ------- |
+| Solus | `libx11-devel libxft-devel` | `imlib2-devel` | `libx11 libxft-devel imlib2` for icon builds |
+| Debian/Ubuntu | `libx11-dev libxft-dev` | `libimlib2-dev` | `libx11-6 libxft2 libimlib2` for icon builds |
+| Arch/Manjaro | `libx11 libxft` | `imlib2` | same packages provide runtime libraries |
+| Fedora | `libX11-devel libXft-devel` | `imlib2-devel` | `libX11 libXft imlib2` for icon builds |
+
+On Solus, `libxft-devel` is currently listed as a runtime requirement because
+the Nim `x11` package dynamically opens `libXft.so`; Solus provides that
+unversioned loader symlink in `libxft-devel`, while `libxft` only provides
+`libXft.so.2`.
 
 Command-line flag:
 
@@ -229,7 +250,33 @@ NimLaunch indexes `.desktop` files from:
 Metadata is cached at `~/.cache/nimlaunch/apps.json`. The cache is invalidated
 automatically when source directories change. Entries flagged as `NoDisplay=true`,
 `Terminal=true`, or belonging solely to the `Settings` / `System` categories are
-skipped so the list remains focused on launchable apps.
+skipped so the list remains focused on launchable apps. Entries with `TryExec`
+are also skipped when the referenced executable is unavailable.
+
+NimLaunch also reads `.desktop` action sections. When an application declares
+actions such as `New Window`, those appear in normal search as `Application:
+New Window` and launch the action's own `Exec` command.
+
+Icon names from `.desktop` files are stored in the app cache. The lightweight
+resolver checks `~/.local/share/icons`, `~/.icons`, `$XDG_DATA_DIRS/icons`, and
+`$XDG_DATA_DIRS/pixmaps` for PNG, XPM, or SVG files, preferring small app icon
+sizes.
+
+Real icon rendering is optional and uses Imlib2. Default builds remain text-only
+and do not link to Imlib2. To enable icons, install the Imlib2 development
+package and build with:
+
+```bash
+nimble debugIcons
+# or
+nimble releaseIcons
+```
+
+Icon-enabled builds produce `./bin/nimlaunch-x11-icons`.
+
+When distributing an icon-enabled binary, users only need the runtime Imlib2
+package. The `*-devel` package is only needed on the machine compiling
+NimLaunch-X11.
 
 Recent launches are tracked in `~/.cache/nimlaunch/recent.json`, ensuring the
 empty-query view always surfaces the last applications you opened.

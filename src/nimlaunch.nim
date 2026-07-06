@@ -9,6 +9,8 @@ when defined(posix):
 import parsetoml as toml
 import x11/[xlib, xutil, x, keysym]
 import ./[state, parser, gui, utils]
+when defined(icons):
+  import ./icon_resolver
 when defined(posix):
   when not declared(flock):
     proc flock(fd: cint; operation: cint): cint {.importc, header: "<sys/file.h>".}
@@ -24,17 +26,52 @@ var
   baseMatchFgColorHex = ""     ## default fallback for match highlight colour
   configFilesLoaded = false
   configFilesCache: seq[DesktopApp] = @[]
+when defined(icons):
+  var
+    iconIndex: IconIndex
+    iconPathCache = initTable[string, string]()
 
 const
   SearchDebounceMs = 240     # debounce for s: while typing (unified)
   SearchFdCap      = 800     # cap external search results from fd/locate
   SearchShowCap    = 250     # cap items we score per rebuild
-  CacheFormatVersion = 3
+  CacheFormatVersion = 5
 
 var
   lockFilePath = ""
 when defined(posix):
   var lockFd: cint = -1
+
+let iconAliases = {
+  "code": "visual-studio-code",
+  "codium": "vscodium",
+  "nvim": "nvim",
+  "neovide": "nvim",
+  "kitty": "kitty",
+  "wezterm": "com.github.wez.wezterm",
+  "alacritty": "Alacritty",
+  "gnome-terminal": "utilities-terminal",
+  "foot": "terminal",
+  "firefox": "firefox",
+  "chromium": "chromium",
+  "google-chrome": "google-chrome",
+  "brave-browser": "brave-browser",
+  "opera": "opera",
+  "vivaldi": "vivaldi",
+  "edge": "microsoft-edge",
+  "discord": "discord",
+  "steam": "steam",
+  "lutris": "lutris",
+  "spotify": "spotify",
+  "vlc": "vlc",
+  "mpv": "mpv",
+  "nautilus": "org.gnome.Nautilus",
+  "dolphin": "dolphin",
+  "thunar": "Thunar",
+  "pcmanfm": "system-file-manager",
+  "gimp": "gimp",
+  "inkscape": "inkscape"
+}.toTable
 
 # ── Single-instance helpers ────────────────────────────────────────────
 when defined(posix):
@@ -915,6 +952,36 @@ proc buildRunActions(rest: string): seq[Action] =
     return @[Action(kind: akPlaceholder, label: "Run: enter a command", exec: "")]
   @[Action(kind: akRun, label: "Run: " & rest, exec: rest)]
 
+proc iconPathFor(icon: string): string =
+  ## Resolve Icon= only in optional icon builds. Default builds stay text-only.
+  when defined(icons):
+    if icon.len == 0:
+      return ""
+    if iconPathCache.hasKey(icon):
+      return iconPathCache[icon]
+    result = resolveIconInIndex(icon, iconIndex, preferredSize = 24)
+    iconPathCache[icon] = result
+  else:
+    ""
+
+proc pickIcon(app: DesktopApp): string =
+  ## Choose an icon name from Icon=, known aliases, or the base executable.
+  if app.icon.len > 0:
+    return app.icon
+  let base = parser.getBaseExec(app.exec).toLowerAscii
+  if iconAliases.hasKey(base):
+    return iconAliases[base]
+  base
+
+proc appIconPath(app: DesktopApp): string =
+  iconPathFor(pickIcon(app))
+
+proc appActionIconPath(app: DesktopApp; entryAction: DesktopEntryAction): string =
+  if entryAction.icon.len > 0:
+    result = iconPathFor(entryAction.icon)
+  if result.len == 0:
+    result = appIconPath(app)
+
 proc buildSearchActions(rest: string): seq[Action] =
   ## File search via :s — respects debounce and reuses cached results.
   let sinceEdit = gui.nowMs() - lastInputChangeMs
@@ -1002,29 +1069,51 @@ proc buildDefaultActions(rest: string; defaultIndex: var int): seq[Action] =
     for name in recentApps:
       if index.hasKey(name):
         let app = index[name]
-        result.add Action(kind: akApp, label: app.name, exec: app.exec, appData: app)
+        result.add Action(kind: akApp, label: app.name, exec: app.exec,
+                          appData: app, iconPath: appIconPath(app))
         seen.incl name
 
     for app in allApps:
       if not seen.contains(app.name):
-        result.add Action(kind: akApp, label: app.name, exec: app.exec, appData: app)
+        result.add Action(kind: akApp, label: app.name, exec: app.exec,
+                          appData: app, iconPath: appIconPath(app))
   else:
-    var top = initHeapQueue[(int, int)]()
+    type RankedAction = tuple[score: int; label: string; appIndex: int;
+        actionIndex: int]
+    var top = initHeapQueue[RankedAction]()
     let limit = config.maxVisibleItems
     for i, app in allApps:
       let s = scoreMatch(rest, app.name, app.name, "")
       if s > -1_000_000:
-        push(top, (s + recentBoost(app.name), i))
+        push(top, (s + recentBoost(app.name), app.name, i, -1))
         if top.len > limit: discard pop(top)
-    var ranked: seq[(int, int)] = @[]
+
+      for actionIndex, entryAction in app.desktopActions:
+        let label = app.name & ": " & entryAction.name
+        var s = max(scoreMatch(rest, label, label, ""),
+                    scoreMatch(rest, entryAction.name, label, ""))
+        if s > -1_000_000:
+          s += recentBoost(app.name)
+          push(top, (s, label, i, actionIndex))
+          if top.len > limit: discard pop(top)
+    var ranked: seq[RankedAction] = @[]
     while top.len > 0: ranked.add pop(top)
-    ranked.sort(proc(a, b: (int, int)): int =
-      result = cmp(b[0], a[0])
-      if result == 0: result = cmpIgnoreCase(allApps[a[1]].name, allApps[b[1]].name)
+    ranked.sort(proc(a, b: RankedAction): int =
+      result = cmp(b.score, a.score)
+      if result == 0: result = cmpIgnoreCase(a.label, b.label)
     )
     for item in ranked:
-      let app = allApps[item[1]]
-      result.add Action(kind: akApp, label: app.name, exec: app.exec, appData: app)
+      let app = allApps[item.appIndex]
+      if item.actionIndex < 0:
+        result.add Action(kind: akApp, label: app.name, exec: app.exec,
+                          appData: app, iconPath: appIconPath(app))
+      else:
+        let entryAction = app.desktopActions[item.actionIndex]
+        result.add Action(kind: akAppAction,
+                          label: item.label,
+                          exec: entryAction.exec,
+                          appData: app,
+                          iconPath: appActionIconPath(app, entryAction))
 
   if result.len == 0:
     result.add Action(kind: akPlaceholder, label: "No applications found", exec: "")
@@ -1035,7 +1124,7 @@ proc updateDisplayRows(cmd: CmdKind; highlightQuery: string; defaultIndex: int) 
   matchSpans.setLen(0)
 
   for act in actions:
-    filteredApps.add DisplayRow(text: act.label)
+    filteredApps.add DisplayRow(text: act.label, iconPath: act.iconPath)
     if highlightQuery.len == 0:
       matchSpans.add @[]
     else:
@@ -1127,13 +1216,18 @@ proc performAction(a: Action) =
       exitAfter = false
   of akFile:
     discard openPathWithFallback(a.exec)
-  of akApp:
+  of akApp, akAppAction:
     ## safer: strip .desktop field codes before launching
     let sanitized = parser.stripFieldCodes(a.exec).strip()
-    if spawnShellCommand(sanitized):
-      let ri = recentApps.find(a.label)
+    let args = parser.tokenize(sanitized)
+    var success = false
+    if args.len > 0:
+      success = spawnProcess(args[0], args[1..^1])
+    if success:
+      let recentName = if a.appData.name.len > 0: a.appData.name else: a.label
+      let ri = recentApps.find(recentName)
       if ri >= 0: recentApps.delete(ri)
-      recentApps.insert(a.label, 0)
+      recentApps.insert(recentName, 0)
       if recentApps.len > maxRecent: recentApps.setLen(maxRecent)
       saveRecent()
     else:
@@ -1385,6 +1479,9 @@ proc main() =
 
   timeIt "Init Config:": initLauncherConfig()
   timeIt "Load Applications:": loadApplications()
+  when defined(icons):
+    timeIt "Build Icon Index:":
+      iconIndex = buildIconIndex(defaultIconRoots())
   timeIt "Load Recent Apps:": loadRecent()
   timeIt "Build Actions:": buildActions()
 

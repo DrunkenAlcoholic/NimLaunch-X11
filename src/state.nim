@@ -12,10 +12,19 @@ import x11/[xlib, x] ## PDisplay, Window, GC, culong
 
 # ── Data structures ─────────────────────────────────────────────────────
 type
+  ## A secondary action declared in a .desktop file.
+  DesktopEntryAction* = object
+    id*: string
+    name*: string
+    exec*: string
+    icon*: string
+    hasIcon*: bool
+
   ## A single launchable application parsed from a `.desktop` file.
   DesktopApp* = object
-    name*, exec*: string
+    name*, exec*, icon*: string
     hasIcon*: bool
+    desktopActions*: seq[DesktopEntryAction]
 
   ## Payload cached to `~/.cache/nimlaunch/apps.json`.
   CacheData* = object
@@ -77,6 +86,7 @@ type
   ## What kind of thing the user can pick.
   ActionKind* = enum
     akApp,       # a real .desktop application
+    akAppAction, # a .desktop secondary action (e.g. New Window)
     akRun,       # a `:r` shell command
     akConfig,    # `:c` file under ~/.config
     akFile,      # `:s` file search (open with default app)
@@ -92,6 +102,7 @@ type
     label*: string       # what gets drawn (e.g. "Firefox" or "Run: ls")
     exec*: string        # what actually gets executed or opened
     appData*: DesktopApp # optional for akApp; empty for other kinds
+    iconPath*: string    # resolved icon path when optional icon support is enabled
     shortcutMode*: ShortcutMode = smUrl
     powerMode*: PowerActionMode = pamSpawn
     stayOpen*: bool = false
@@ -99,6 +110,7 @@ type
   ## Lightweight row metadata for rendering the results list.
   DisplayRow* = object
     text*: string
+    iconPath*: string
 
   ## Theme definition (matchFgColorHex is explicit; no "auto" support).
   Theme* = object

@@ -9,6 +9,8 @@
 import std/[strutils, times, os]
 import x11/[xlib, xft, x, xrender]
 import ./[state, utils] # display*, screen*, window*, gc*, config …
+when defined(icons):
+  import ./x11_icons
 
 # ── Global Xft handles ──────────────────────────────────────────────────
 var
@@ -305,12 +307,14 @@ proc initGui*() =
     DefaultVisual(display, screen),
     DefaultColormap(display, screen)
   )
+  when defined(icons):
+    initIconRenderer()
 
   initInputContext()
 
 # ── Drawing routines ────────────────────────────────────────────────────
 proc drawText*(txt: string; x, y: cint; spans: seq[(int, int)] = @[];
-    selected = false) =
+    selected = false; iconPath = "") =
   ## Draw a single line with optional highlighted spans.
   let bgCol = if selected: xftColorHighlightBg else: xftColorBg
   discard XSetForeground(display, gc, bgCol)
@@ -321,6 +325,14 @@ proc drawText*(txt: string; x, y: cint; spans: seq[(int, int)] = @[];
     cuint(config.lineHeight)
   )
 
+  var textX = x
+  when defined(icons):
+    if iconPath.len > 0:
+      let iconSize = max(8, min(config.lineHeight - 4, 24)).cint
+      let iconY = y - font.ascent + ((config.lineHeight.cint - iconSize) div 2)
+      if drawIcon(iconPath, x, iconY, iconSize):
+        textX = x + iconSize + 8
+
   ## Base text
   let baseFg = if selected: xftColorHighlightFg else: xftColorFg
   if txt.len > 0:
@@ -328,7 +340,7 @@ proc drawText*(txt: string; x, y: cint; spans: seq[(int, int)] = @[];
       xftDraw,
       cast[PXftColor](addr baseFg),
       font,
-      x, y,
+      textX, y,
       cast[PFcChar8](txt[0].addr),
       txt.len.cint
     )
@@ -341,7 +353,7 @@ proc drawText*(txt: string; x, y: cint; spans: seq[(int, int)] = @[];
     let pre = if s > 0: txt[0 ..< s] else: ""
     let seg = txt[s ..< e]
     if seg.len == 0: continue
-    let xPos = x + textWidth(pre)
+    let xPos = textX + textWidth(pre)
     XftDrawStringUtf8(
       xftDraw,
       cast[PXftColor](addr xftColorMatchFg),
@@ -380,7 +392,10 @@ proc redrawWindow*() =
   for idx in start ..< finish:
     let row = filteredApps[idx]
     let selected = (idx == selectedIndex)
-    drawText(row.text, 12, y, matchSpans[idx], selected)
+    when defined(icons):
+      drawText(row.text, 12, y, matchSpans[idx], selected, row.iconPath)
+    else:
+      drawText(row.text, 12, y, matchSpans[idx], selected)
     y += config.lineHeight.cint
 
   ## Command line (bottom)

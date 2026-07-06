@@ -172,6 +172,22 @@ proc getBestValue*(entries: Table[string, string], baseKey: string): string =
       return val
   ""
 
+proc splitDesktopList(value: string): seq[string] =
+  ## Split semicolon-delimited .desktop lists, ignoring empty trailing fields.
+  for item in value.split(';'):
+    let cleaned = item.strip()
+    if cleaned.len > 0:
+      result.add cleaned
+
+proc tryExecAvailable(value: string): bool =
+  ## TryExec names either an executable in PATH or an explicit filesystem path.
+  if value.len == 0:
+    return true
+  if value.contains('/'):
+    fileExists(value.expandTilde())
+  else:
+    findExe(value).len > 0
+
 # ── .desktop parser ─────────────────────────────────────────────────────
 
 proc parseDesktopFile*(path: string): Option[DesktopApp] =
@@ -186,20 +202,34 @@ proc parseDesktopFile*(path: string): Option[DesktopApp] =
     return none(DesktopApp)
   defer: fs.close()
 
-  var inDesktopEntry = false
+  var currentSection = ""
   var kv = initTable[string, string]()
+  var actionSections = initTable[string, Table[string, string]]()
 
   for raw in fs.lines:
     let line = raw.strip()
     if line.len == 0 or line.startsWith('#'):
       continue
     if line.startsWith('[') and line.endsWith(']'):
-      inDesktopEntry = (line == "[Desktop Entry]")
+      currentSection = line[1 ..< line.len - 1].strip()
       continue
-    if inDesktopEntry and '=' in line:
-      let parts = line.split('=', 1)
-      if parts.len == 2:
-        kv[parts[0].strip()] = parts[1].strip()
+    let eq = line.find('=')
+    if eq <= 0:
+      continue
+    let key = line[0 ..< eq].strip()
+    if key.len == 0:
+      continue
+    let value =
+      if eq + 1 < line.len: line[eq + 1 .. ^1].strip()
+      else: ""
+    if currentSection == "Desktop Entry":
+      kv[key] = value
+    elif currentSection.startsWith("Desktop Action "):
+      let actionId = currentSection["Desktop Action ".len .. ^1].strip()
+      if actionId.len > 0:
+        if not actionSections.hasKey(actionId):
+          actionSections[actionId] = initTable[string, string]()
+        actionSections[actionId][key] = value
 
   let name = getBestValue(kv, "Name")
   let exec = getBestValue(kv, "Exec")
@@ -220,9 +250,31 @@ proc parseDesktopFile*(path: string): Option[DesktopApp] =
 
   let launchable =
     name.len > 0 and exec.len > 0 and
-    not noDisplay and not hidden and not terminalApp and not catHit
+    not noDisplay and not hidden and not terminalApp and not catHit and
+    tryExecAvailable(kv.getOrDefault("TryExec", ""))
 
   if launchable:
-    some(DesktopApp(name: name, exec: exec, hasIcon: icon.len > 0))
+    var desktopActions: seq[DesktopEntryAction] = @[]
+    for actionId in splitDesktopList(kv.getOrDefault("Actions", "")):
+      if not actionSections.hasKey(actionId):
+        continue
+      let section = actionSections[actionId]
+      let actionName = getBestValue(section, "Name")
+      let actionExec = getBestValue(section, "Exec")
+      if actionName.len == 0 or actionExec.len == 0:
+        continue
+      if section.getOrDefault("NoDisplay", "false").toLowerAscii() == "true":
+        continue
+      let actionIcon = getBestValue(section, "Icon")
+      desktopActions.add DesktopEntryAction(
+        id: actionId,
+        name: actionName,
+        exec: actionExec,
+        icon: actionIcon,
+        hasIcon: actionIcon.len > 0
+      )
+
+    some(DesktopApp(name: name, exec: exec, icon: icon, hasIcon: icon.len > 0,
+                    desktopActions: desktopActions))
   else:
     none(DesktopApp)
