@@ -33,6 +33,7 @@ Optional icon rendering can be enabled at build time with Imlib2.
 - **Optional icons** – app icon names are cached from `.desktop` files; default
   builds stay text-only, while `-d:icons` builds render icons with Imlib2.
 - **Themeable** – 25+ bundled themes with instant `:t` preview and easy TOML tweaks.
+- **dmenu mode** – scriptable UI via `--dmenu` standard input piping.
 - **Single-instance guard** – second launch exits immediately instead of
   spawning duplicate windows.
 
@@ -84,6 +85,7 @@ unversioned loader symlink in `libxft-devel`, while `libxft` only provides
 Command-line flag:
 
 - `--bench` – prints millisecond startup timings and exits.
+- `--dmenu` (or `-dmenu`) – read options from standard input (`stdin`) and print selection to `stdout`.
 
 ---
 
@@ -114,10 +116,10 @@ core workflow:
 | `:c` | `:c sway` | Match files inside `~/.config` and open with the default handler |
 | `:r` | `:r htop` | Run a shell command inside your preferred terminal |
 | `!` | `!htop` | Shorthand for `:r` without the colon |
-| `:p` | `:p lock` | Show configured power/system actions (label filter) |
+| *any* | `:p lock` | Create any custom `[[menus]]` prefix (e.g. `:p`) to trigger static lists |
 
 `:s` results render as `filename — /path/to/dir` and open with the system
-handler. Power actions can either spawn in the background or run inside your
+handler. Menu actions can either spawn in the background or run inside your
 configured terminal depending on their `mode`.
 
 ### Vim mode
@@ -140,6 +142,10 @@ Vim mode adds:
 ---
 
 ## Configuration
+
+For detailed documentation, please refer to the `docs/` folder:
+- [Configuration Guide](docs/CONFIGURATION.md)
+- [Advanced Features & Examples (Menus, dmenu, Shortcuts)](docs/EXAMPLES.md)
 
 The config lives at `~/.config/nimlaunch/nimlaunch.toml`. It is auto-generated
 on first run, shipping with sensible defaults and a long list of themes.
@@ -171,14 +177,15 @@ label  = "Search Google: "
 base   = "https://www.google.com/search?q={query}"
 mode   = "url"            # other options: "shell", "file"
 
-[power]
-prefix = ":p"            # write with or without ':'; the UI trigger remains :p
+[[menus]]
+prefix = ":p"
+name = "Power Options"
 
-[[power_actions]]
-label   = "Shutdown"
-command = "systemctl poweroff"
-mode    = "spawn"         # or "terminal"
-stay_open = false
+  [[menus.items]]
+  label   = "Shutdown"
+  command = "systemctl poweroff"
+  mode    = "spawn"         # or "terminal"
+  stay_open = false
 
 [[themes]]
 name                = "Nord"
@@ -193,7 +200,7 @@ matchFgColorHex     = "#f8c291"
 last_chosen = "Nord"
 ```
 
-Shortcut and power prefixes are stored case-insensitively without leading/trailing
+Shortcut and menu prefixes are stored case-insensitively without leading/trailing
 colons, so feel free to write `g:`, `:g`, or just `g`. At runtime you still press
 `:` followed by the keyword (for example `:g search terms`).
 
@@ -224,17 +231,15 @@ mode   = "file"
 expands `~` and launches the path with your default handler. If the file is
 missing, NimLaunch stays open so you can adjust the query.
 
-### Power actions
+### Custom Menus
 
-`[[power_actions]]` entries expose shutdown/reboot/lock/etc. commands behind a
-keyword (default `:p`). Each action supports:
+`[[menus]]` entries expose static choices (like shutdown/reboot or screenshots) behind a
+prefix (e.g., `:p` or `:sc`). Each menu item supports:
 
 - `label` – text shown in the list.
 - `command` – shell command executed via `/bin/sh -c`.
 - `mode` – `spawn` (background) or `terminal` (run inside the configured terminal).
 - `stay_open` – keep NimLaunch open after execution.
-
-Set `[power].prefix = "x"` (or clear it) to change or disable the trigger.
 
 ---
 

@@ -253,6 +253,11 @@ proc parseDesktopFile*(path: string): Option[DesktopApp] =
     not noDisplay and not hidden and not terminalApp and not catHit and
     tryExecAvailable(kv.getOrDefault("TryExec", ""))
 
+  let keywordsStr = getBestValue(kv, "Keywords")
+  var keywords: seq[string] = @[]
+  for kw in splitDesktopList(keywordsStr):
+    keywords.add kw
+
   if launchable:
     var desktopActions: seq[DesktopEntryAction] = @[]
     for actionId in splitDesktopList(kv.getOrDefault("Actions", "")):
@@ -274,7 +279,7 @@ proc parseDesktopFile*(path: string): Option[DesktopApp] =
         hasIcon: actionIcon.len > 0
       )
 
-    some(DesktopApp(name: name, exec: exec, icon: icon, hasIcon: icon.len > 0,
+    some(DesktopApp(name: name, exec: exec, icon: icon, keywords: keywords, hasIcon: icon.len > 0,
                     desktopActions: desktopActions))
   else:
     none(DesktopApp)

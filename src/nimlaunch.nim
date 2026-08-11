@@ -8,7 +8,7 @@ when defined(posix):
   import posix
 import parsetoml as toml
 import x11/[xlib, xutil, x, keysym]
-import ./[state, parser, gui, utils]
+import ./[state, parser, gui, utils, executor]
 when defined(icons):
   import ./icon_resolver
 when defined(posix):
@@ -35,7 +35,7 @@ const
   SearchDebounceMs = 240     # debounce for s: while typing (unified)
   SearchFdCap      = 800     # cap external search results from fd/locate
   SearchShowCap    = 250     # cap items we score per rebuild
-  CacheFormatVersion = 5
+  CacheFormatVersion = 6
 
 var
   lockFilePath = ""
@@ -143,92 +143,6 @@ else:
     except CatchableError:
       discard
     true
-
-# ── Shell / process helpers ─────────────────────────────────────────────
-proc hasHoldFlagLocal(args: seq[string]): bool =
-  ## Detect common "keep window open" flags passed to terminals.
-  for a in args:
-    case a
-    of "--hold", "-hold", "--keep-open", "--wait", "--noclose",
-       "--stay-open", "--keep", "--keepalive":
-      return true
-    else:
-      discard
-  false
-
-proc appendShellArgs(argv: var seq[string]; shExe: string; shArgs: seq[string]) =
-  ## Append shell executable and its arguments to `argv`.
-  argv.add shExe
-  for a in shArgs: argv.add a
-
-proc buildTerminalArgs(base: string; termArgs: seq[string]; shExe: string;
-                       shArgs: seq[string]): seq[string] =
-  ## Normalize command-line to launch a shell inside major terminals.
-  var argv = termArgs
-  case base
-  of "gnome-terminal", "kgx":
-    argv.add "--"
-  of "wezterm":
-    argv = @["start"] & argv
-  else:
-    argv.add "-e"
-  appendShellArgs(argv, shExe, shArgs)
-  argv
-
-proc buildShellCommand(cmd, shExe: string; hold = false):
-    tuple[fullCmd: string, shArgs: seq[string]] =
-  ## Run user's command in a group, and add a robust hold prompt when needed.
-  ## Grouping prevents suffix binding to pipelines/conditionals.
-  let suffix = (if hold: "" else: "; printf '\\n[Press Enter to close]\\n'; read -r _")
-  let fullCmd = "{ " & cmd & " ; }" & suffix
-  let shArgs = if shExe.endsWith("bash"): @["-lc", fullCmd] else: @["-c", fullCmd]
-  (fullCmd, shArgs)
-
-proc runCommand(cmd: string) =
-  ## Run `cmd` in the user's terminal; fall back to /bin/sh if none.
-  let bash = findExe("bash")
-  let shExe = if bash.len > 0: bash else: "/bin/sh"
-
-  var parts = tokenize(chooseTerminal()) # parser.tokenize on config.terminalExe/$TERMINAL
-  if parts.len == 0:
-    let (_, shArgs) = buildShellCommand(cmd, shExe)
-    discard startProcess(shExe, args = shArgs,
-                         options = {poDaemon, poParentStreams})
-    return
-
-  let exe = parts[0]
-  let exePath = findExe(exe)
-  if exePath.len == 0:
-    let (_, shArgs) = buildShellCommand(cmd, shExe)
-    discard startProcess(shExe, args = shArgs,
-                         options = {poDaemon, poParentStreams})
-    return
-
-  var termArgs = if parts.len > 1: parts[1..^1] else: @[]
-  let base = exe.extractFilename()
-  let hold = hasHoldFlagLocal(termArgs)
-  let (_, shArgs) = buildShellCommand(cmd, shExe, hold)
-  let argv = buildTerminalArgs(base, termArgs, shExe, shArgs)
-  discard startProcess(exePath, args = argv,
-                       options = {poDaemon, poParentStreams})
-
-proc spawnShellCommand(cmd: string): bool =
-  ## Execute *cmd* via /bin/sh in the background; return success.
-  try:
-    discard startProcess("/bin/sh", args = ["-c", cmd],
-                         options = {poDaemon, poParentStreams})
-    true
-  except CatchableError as e:
-    echo "spawnShellCommand failed: ", cmd, " (", e.name, "): ", e.msg
-    false
-
-proc openUrl(url: string) =
-  ## Open *url* via xdg-open (no shell involved). Log failures for diagnosis.
-  try:
-    discard startProcess("/usr/bin/env", args = @["xdg-open", url],
-                         options = {poDaemon, poParentStreams})
-  except CatchableError as e:
-    echo "openUrl failed: ", url, " (", e.name, "): ", e.msg
 
 # ── Small searches: ~/.config helper ────────────────────────────────────
 proc shortenPath(p: string; maxLen = 80): string =
@@ -426,6 +340,8 @@ proc loadApplications() =
            c.flatpakSystemMtime == flatpakSystemM:
           timeIt "Cache hit:":
             allApps = c.apps
+            allAppsIndex = initTable[string, DesktopApp](allApps.len * 2)
+            for app in allApps: allAppsIndex[app.name] = app
             filteredApps = @[]
             matchSpans = @[]
           return
@@ -454,6 +370,8 @@ proc loadApplications() =
 
     allApps = dedup.values.toSeq
     allApps.sort(proc(a, b: DesktopApp): int = cmpIgnoreCase(a.name, b.name))
+    allAppsIndex = initTable[string, DesktopApp](allApps.len * 2)
+    for app in allApps: allAppsIndex[app.name] = app
     filteredApps = @[]
     matchSpans = @[]
     try:
@@ -495,43 +413,36 @@ proc loadShortcutsSection(tbl: toml.TomlValueRef; cfgPath: string) =
   except CatchableError:
     echo "NimLaunch warning: ignoring invalid [[shortcuts]] entries in ", cfgPath
 
-proc loadPowerSection(tbl: toml.TomlValueRef; cfgPath: string) =
-  ## Populate power prefix and `state.powerActions` from *tbl*.
-  powerActions = @[]
-
-  if tbl.hasKey("power"):
-    try:
-      let p = tbl["power"].getTable()
-      let rawPrefix = p.getOrDefault("prefix").getStr(config.powerPrefix)
-      config.powerPrefix = normalizePrefix(rawPrefix)
-    except CatchableError:
-      echo "NimLaunch warning: ignoring invalid [power] section in ", cfgPath
-
-  if not tbl.hasKey("power_actions"): return
+proc loadMenusSection(tbl: toml.TomlValueRef; cfgPath: string) =
+  menus = @[]
+  if not tbl.hasKey("menus"): return
 
   try:
-    for paVal in tbl["power_actions"].getElems():
-      let paTbl = paVal.getTable()
-      let label = paTbl.getOrDefault("label").getStr("").strip()
-      let command = paTbl.getOrDefault("command").getStr("").strip()
-      if label.len == 0 or command.len == 0:
-        continue
+    for mVal in tbl["menus"].getElems():
+      let mTbl = mVal.getTable()
+      let rawPrefix = mTbl.getOrDefault("prefix").getStr("").strip()
+      let name = mTbl.getOrDefault("name").getStr("").strip()
+      if rawPrefix.len == 0: continue
 
-      var mode = pamSpawn
-      let modeStr = paTbl.getOrDefault("mode").getStr("spawn").strip().toLowerAscii
-      case modeStr
-      of "terminal": mode = pamTerminal
-      of "spawn", "shell": discard
-      else: discard
+      var items: seq[MenuItem] = @[]
+      if mTbl.hasKey("items"):
+        for iVal in mTbl["items"].getElems():
+          let iTbl = iVal.getTable()
+          let label = iTbl.getOrDefault("label").getStr("").strip()
+          let command = iTbl.getOrDefault("command").getStr("").strip()
+          if label.len == 0 or command.len == 0: continue
 
-      let stayOpen = paTbl.getOrDefault("stay_open").getBool(false)
+          var mode = mamSpawn
+          let modeStr = iTbl.getOrDefault("mode").getStr("spawn").strip().toLowerAscii
+          case modeStr
+          of "terminal": mode = mamTerminal
+          else: discard
+          let stayOpen = iTbl.getOrDefault("stay_open").getBool(false)
+          items.add MenuItem(label: label, command: command, mode: mode, stayOpen: stayOpen)
 
-      powerActions.add PowerAction(label: label,
-                                   command: command,
-                                   mode: mode,
-                                   stayOpen: stayOpen)
+      menus.add Menu(prefix: normalizePrefix(rawPrefix), name: name, items: items)
   except CatchableError:
-    echo "NimLaunch warning: ignoring invalid [[power_actions]] entries in ", cfgPath
+    echo "NimLaunch warning: ignoring invalid [[menus]] entries in ", cfgPath
 
 # ── Load & apply config from TOML ───────────────────────────────────────
 proc initLauncherConfig() =
@@ -552,7 +463,6 @@ proc initLauncherConfig() =
   config.terminalExe = "gnome-terminal"
   config.borderWidth = 2
   config.matchFgColorHex = "#f8c291"
-  config.powerPrefix = normalizePrefix("p:")
   config.vimMode = false
 
   ## Ensure TOML exists
@@ -632,7 +542,7 @@ proc initLauncherConfig() =
       echo "NimLaunch warning: ignoring invalid [[themes]] entries in ", cfgPath
 
   loadShortcutsSection(tbl, cfgPath)
-  loadPowerSection(tbl, cfgPath)
+  loadMenusSection(tbl, cfgPath)
 
   ## last_chosen (case-insensitive match; fallback to first theme)
   var lastName = ""
@@ -788,7 +698,7 @@ type CmdKind = enum
   ckTheme,       # `t:`
   ckConfig,      # `c:`
   ckSearch,      # `s:` fast file search
-  ckPower,       # `p:` system/power actions
+  ckMenu,        # custom dynamic menus
   ckShortcut,    # custom shortcuts (e.g. :g, :wiki)
   ckRun          # raw `r:` command
 
@@ -811,8 +721,9 @@ proc parseCommand(inputText: string): (CmdKind, string, int) =
     of "t": return (ckTheme, rest, -1)
     of "r": return (ckRun, rest, -1)
     else:
-      if config.powerPrefix.len > 0 and norm == config.powerPrefix:
-        return (ckPower, rest, -1)
+      for i, m in menus:
+        if norm == m.prefix:
+          return (ckMenu, rest, i)
       for i, sc in shortcuts:
         if norm == sc.prefix:
           return (ckShortcut, rest, i)
@@ -929,20 +840,22 @@ proc buildShortcutActions(rest: string; shortcutIdx: int): seq[Action] =
            exec: shortcutExec(sc, rest),
            shortcutMode: sc.mode)]
 
-proc buildPowerActions(rest: string): seq[Action] =
-  ## Build power/system actions filtered by label.
-  if powerActions.len == 0:
+proc buildMenuActions(idx: int, rest: string): seq[Action] =
+  ## Build menu items filtered by label.
+  if menus.len <= idx: return @[]
+  let menu = menus[idx]
+  if menu.items.len == 0:
     return @[Action(kind: akPlaceholder,
-                    label: "No power actions configured",
+                    label: "No items in menu: " & menu.name,
                     exec: "")]
   let ql = rest.strip().toLowerAscii
-  for pa in powerActions:
-    if ql.len == 0 or pa.label.toLowerAscii.contains(ql):
-      result.add Action(kind: akPower,
-                        label: pa.label,
-                        exec: pa.command,
-                        powerMode: pa.mode,
-                        stayOpen: pa.stayOpen)
+  for item in menu.items:
+    if ql.len == 0 or item.label.toLowerAscii.contains(ql):
+      result.add Action(kind: akMenuAction,
+                        label: item.label,
+                        exec: item.command,
+                        menuMode: item.mode,
+                        stayOpen: item.stayOpen)
   if result.len == 0:
     result.add Action(kind: akPlaceholder, label: "No matches", exec: "")
 
@@ -1061,14 +974,12 @@ proc buildDefaultActions(rest: string; defaultIndex: var int): seq[Action] =
   ## Default launcher view — MRU when empty, fuzzy search otherwise.
   defaultIndex = 0
   if rest.len == 0:
-    var index = initTable[string, DesktopApp](allApps.len * 2)
-    for app in allApps:
-      index[app.name] = app
-
     var seen = initHashSet[string]()
     for name in recentApps:
-      if index.hasKey(name):
-        let app = index[name]
+      if allAppsIndex.hasKey(name):
+        let app = allAppsIndex[name]
+
+
         result.add Action(kind: akApp, label: app.name, exec: app.exec,
                           appData: app, iconPath: appIconPath(app))
         seen.incl name
@@ -1083,7 +994,9 @@ proc buildDefaultActions(rest: string; defaultIndex: var int): seq[Action] =
     var top = initHeapQueue[RankedAction]()
     let limit = config.maxVisibleItems
     for i, app in allApps:
-      let s = scoreMatch(rest, app.name, app.name, "")
+      var s = scoreMatch(rest, app.name, app.name, "")
+      for kw in app.keywords:
+        s = max(s, scoreMatch(rest, kw, kw, "") - 100) # Slightly penalize keywords so exact names match first
       if s > -1_000_000:
         push(top, (s + recentBoost(app.name), app.name, i, -1))
         if top.len > limit: discard pop(top)
@@ -1182,8 +1095,8 @@ proc buildActions() =
     nextActions = buildConfigActions(rest)
   of ckShortcut:
     nextActions = buildShortcutActions(rest, shortcutIdx)
-  of ckPower:
-    nextActions = buildPowerActions(rest)
+  of ckMenu:
+    nextActions = buildMenuActions(shortcutIdx, rest)
   of ckSearch:
     nextActions = buildSearchActions(rest)
   of ckRun:
@@ -1247,12 +1160,12 @@ proc performAction(a: Action) =
       elif not openPathWithFallback(expanded):
         gui.notifyStatus("Failed to open: " & shortenPath(expanded, 50), 1600)
         exitAfter = false
-  of akPower:
+  of akMenuAction:
     var success = true
-    case a.powerMode
-    of pamSpawn:
+    case a.menuMode
+    of mamSpawn:
       success = spawnShellCommand(a.exec)
-    of pamTerminal:
+    of mamTerminal:
       runCommand(a.exec)
     if not success:
       gui.notifyStatus("Failed: " & a.label, 1600)
@@ -1280,7 +1193,11 @@ proc deleteLastInputChar() =
 
 proc activateCurrentSelection() =
   if selectedIndex in 0..<actions.len:
-    performAction(actions[selectedIndex])
+    if dmenuMode:
+      echo actions[selectedIndex].exec
+      shouldExit = true
+    else:
+      performAction(actions[selectedIndex])
 
 proc moveSelectionBy(step: int) =
   if filteredApps.len == 0: return
@@ -1476,13 +1393,23 @@ proc main() =
     echo "NimLaunch is already running."
     quit 0
   benchMode = "--bench" in commandLineParams()
+  dmenuMode = "--dmenu" in commandLineParams() or "-dmenu" in commandLineParams()
 
   timeIt "Init Config:": initLauncherConfig()
-  timeIt "Load Applications:": loadApplications()
-  when defined(icons):
-    timeIt "Build Icon Index:":
-      iconIndex = buildIconIndex(defaultIconRoots())
-  timeIt "Load Recent Apps:": loadRecent()
+  
+  if dmenuMode:
+    allApps = @[]
+    for line in stdin.lines:
+      let clean = line.strip()
+      if clean.len > 0:
+        allApps.add DesktopApp(name: clean, exec: clean)
+    allAppsIndex = initTable[string, DesktopApp]()
+  else:
+    timeIt "Load Applications:": loadApplications()
+    when defined(icons):
+      timeIt "Build Icon Index:":
+        iconIndex = buildIconIndex(defaultIconRoots())
+    timeIt "Load Recent Apps:": loadRecent()
   timeIt "Build Actions:": buildActions()
 
   vimPendingG = false

@@ -8,6 +8,7 @@
 ##
 ## This module is intentionally logic-free.
 
+import std/tables
 import x11/[xlib, x] ## PDisplay, Window, GC, culong
 
 # ── Data structures ─────────────────────────────────────────────────────
@@ -23,6 +24,7 @@ type
   ## A single launchable application parsed from a `.desktop` file.
   DesktopApp* = object
     name*, exec*, icon*: string
+    keywords*: seq[string]
     hasIcon*: bool
     desktopActions*: seq[DesktopEntryAction]
 
@@ -54,7 +56,6 @@ type
     fontName*: string
     themeName*: string
     terminalExe*: string     ## preferred terminal program
-    powerPrefix*: string     ## normalized power keyword (no leading ':')
     vimMode*: bool
 
     # Resolved X pixel colours (set once the X connection is live) -------
@@ -72,16 +73,20 @@ type
     prefix*, label*, base*: string
     mode*: ShortcutMode
 
-  PowerActionMode* = enum
-    pamSpawn,    # execute via background shell
-    pamTerminal  # run inside configured terminal
+  MenuActionMode* = enum
+    mamSpawn,    # execute via background shell
+    mamTerminal  # run inside configured terminal
 
-  ## Configurable system/power action.
-  PowerAction* = object
+  MenuItem* = object
     label*: string
     command*: string
-    mode*: PowerActionMode
+    mode*: MenuActionMode
     stayOpen*: bool
+
+  Menu* = object
+    prefix*: string
+    name*: string
+    items*: seq[MenuItem]
 
   ## What kind of thing the user can pick.
   ActionKind* = enum
@@ -92,7 +97,7 @@ type
     akFile,      # `:s` file search (open with default app)
     akShortcut,  # configurable shortcut (URL/shell/file)
     akTheme,     # `:t` Theme selector
-    akPower,     # power/system management entries
+    akMenuAction, # items within a custom menu
     akPlaceholder
 
 
@@ -104,7 +109,7 @@ type
     appData*: DesktopApp # optional for akApp; empty for other kinds
     iconPath*: string    # resolved icon path when optional icon support is enabled
     shortcutMode*: ShortcutMode = smUrl
-    powerMode*: PowerActionMode = pamSpawn
+    menuMode*: MenuActionMode = mamSpawn
     stayOpen*: bool = false
 
   ## Lightweight row metadata for rendering the results list.
@@ -135,9 +140,11 @@ var
 var
   config*: Config                   ## parsed launcher configuration
   allApps*: seq[DesktopApp]
+  allAppsIndex*: Table[string, DesktopApp]
   filteredApps*: seq[DisplayRow]    ## full list & current view slice
   inputText*: string                ## raw user input
   selectedIndex*: int               ## index into `filteredApps`
+  dmenuMode*: bool = false          ## `--dmenu` flag
   viewOffset*: int                  ## first visible item row
   shouldExit*: bool
   benchMode*: bool = false          ## `--bench` flag (minimal redraws)
@@ -146,7 +153,7 @@ var
   themeList*: seq[Theme]
   matchSpans*: seq[seq[(int, int)]] ## per row: (start,len) spans to highlight
   shortcuts*: seq[Shortcut]
-  powerActions*: seq[PowerAction]
+  menus*: seq[Menu]
   vimCommandBuffer*: string
   vimLastSearchBuffer*: string
   vimPendingG*: bool = false
@@ -234,29 +241,29 @@ mode   = "url"
 # Use `:r` (or `!`) to execute shell commands directly without a custom shortcut.
 
 # ==========================
-# Power actions
+# Custom Menus
 # ==========================
-# Configure system commands exposed under the `p` prefix (type `:p` in the UI).
+# Define custom menus containing static lists of commands.
 # `mode` accepts "spawn" (background shell) or "terminal" (runs inside
 # your configured terminal). `stay_open = true` keeps the launcher visible.
 
-[power]
-prefix = ":p"           # Any prefix you write (with/without ':') maps to one trigger
+[[menus]]
+prefix = ":p"
+name = "Power Options"
+  [[menus.items]]
+  label   = "Shutdown"
+  command = "systemctl poweroff"
+  mode    = "spawn"
 
-[[power_actions]]
-label   = "Shutdown"
-command = "systemctl poweroff"
-mode    = "spawn"
+  [[menus.items]]
+  label   = "Reboot"
+  command = "systemctl reboot"
+  mode    = "spawn"
 
-[[power_actions]]
-label   = "Reboot"
-command = "systemctl reboot"
-mode    = "spawn"
-
-[[power_actions]]
-label       = "Logout"
-command     = "loginctl terminate-user $USER"
-mode        = "spawn"
+  [[menus.items]]
+  label       = "Logout"
+  command     = "loginctl terminate-user $USER"
+  mode        = "spawn"
 
 # ==========================
 # Themes
