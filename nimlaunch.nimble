@@ -1,4 +1,4 @@
-version       = "0.3.0"
+version       = "0.8.0"
 author        = "DrunkenAlcoholic"
 description   = "A simple, fast, and highly configurable application launcher for X11"
 license       = "MIT"
