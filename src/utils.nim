@@ -205,3 +205,39 @@ proc saveRecent*() =
     writeFile(recentFile, pretty(%state.recentApps))
   except CatchableError as e:
     echo "saveRecent warning: ", recentFile, " (", e.name, "): ", e.msg
+
+proc normalizePrefix*(prefix: string): string =
+  ## Canonicalise user-configured prefixes by trimming colons/whitespace and
+  ## lowercasing so parsing is resilient to variants like ":g", "g:" or ":G:".
+  result = prefix.strip(chars = Whitespace + {':'}).toLowerAscii
+
+proc refreshConfigFiles*() =
+  ## Build the cached ~/.config file list once per run.
+  configFilesCache.setLen(0)
+  let base = getHomeDir() / ".config"
+  try:
+    for path in walkDirRec(base, yieldFilter = {pcFile}):
+      let fn = path.extractFilename
+      if fn.len == 0: continue
+      configFilesCache.add DesktopApp(
+        name: fn,
+        exec: "xdg-open " & shellQuote(path),
+        hasIcon: false
+      )
+  except OSError:
+    discard
+  configFilesLoaded = true
+
+proc ensureConfigFiles*() =
+  if not configFilesLoaded:
+    refreshConfigFiles()
+
+proc shortenPath*(p: string; maxLen = 80): string =
+  ## Replace $HOME with ~, and ellipsize the middle if too long.
+  var s = p
+  let home = getHomeDir()
+  if s.startsWith(home & "/"): s = "~" & s[home.len .. ^1]
+  if s.len <= maxLen: return s
+  let keep = maxLen div 2 - 2
+  if keep <= 0: return s
+  result = s[0 ..< keep] & "…" & s[s.len - keep .. ^1]

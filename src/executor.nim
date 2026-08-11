@@ -2,7 +2,7 @@
 ## MIT; see LICENSE for details.
 
 import std/[os, osproc, strutils]
-import ./[state, parser, utils]
+import ./[parser, utils]
 
 proc hasHoldFlagLocal*(args: seq[string]): bool =
   ## Detect common "keep window open" flags passed to terminals.

@@ -13,8 +13,8 @@
 ##     sudo/pkexec. The goal is a stable "base exec" key for deduplication.
 ##   - Locale resolution follows .desktop rules: key[lang_COUNTRY] → key[lang] → any variant.
 
-import std/[os, strutils, streams, tables, options]
-import state # DesktopApp
+import std/[os, strutils, streams, tables, options, times, json, algorithm, sequtils]
+import state
 
 # ── Internal helpers ────────────────────────────────────────────────────
 
@@ -283,3 +283,81 @@ proc parseDesktopFile*(path: string): Option[DesktopApp] =
                     desktopActions: desktopActions))
   else:
     none(DesktopApp)
+
+proc newestDesktopMtime*(dir: string): int64 =
+  ## Return newest mtime among *.desktop files under *dir* (recursive).
+  if not dirExists(dir): return 0
+  var newest = 0'i64
+  for entry in walkDirRec(dir, yieldFilter = {pcFile}):
+    if entry.endsWith(".desktop"):
+      let m = times.toUnix(getLastModificationTime(entry))
+      if m > newest: newest = m
+  newest
+
+proc loadApplications*() =
+  ## Scan .desktop files with caching to ~/.cache/nimlaunch/apps.json.
+  let usrDir   = "/usr/share/applications"
+  let locDir   = getHomeDir() / ".local/share/applications"
+  let flatpakUserDir = getHomeDir() / ".local/share/flatpak/exports/share/applications"
+  let flatpakSystemDir = "/var/lib/flatpak/exports/share/applications"
+  let cacheDir = getHomeDir() / ".cache" / "nimlaunch"
+  let cacheFile = cacheDir / "apps.json"
+
+  let usrM = newestDesktopMtime(usrDir)
+  let locM = newestDesktopMtime(locDir)
+  let flatpakUserM = newestDesktopMtime(flatpakUserDir)
+  let flatpakSystemM = newestDesktopMtime(flatpakSystemDir)
+
+  if fileExists(cacheFile):
+    try:
+      let node = parseJson(readFile(cacheFile))
+      if node.kind == JObject and node.hasKey("formatVersion") and
+         node["formatVersion"].getInt == CacheFormatVersion:
+        let c = to(node, CacheData)
+        if c.usrMtime == usrM and c.localMtime == locM and
+           c.flatpakUserMtime == flatpakUserM and
+           c.flatpakSystemMtime == flatpakSystemM:
+          allApps = c.apps
+          allAppsIndex = initTable[string, DesktopApp](allApps.len * 2)
+          for app in allApps: allAppsIndex[app.name] = app
+          filteredApps = @[]
+          matchSpans = @[]
+          return
+      else:
+        echo "Cache invalid — rescanning …"
+    except:
+      echo "Cache miss — rescanning …"
+
+  var dedup = initTable[string, DesktopApp]()
+  for dir in @[flatpakUserDir, locDir, usrDir, flatpakSystemDir]:
+    if not dirExists(dir): continue
+    for path in walkDirRec(dir, yieldFilter = {pcFile}):
+      if not path.endsWith(".desktop"): continue
+      let opt = parseDesktopFile(path)
+      if isSome(opt):
+        let app = get(opt)
+        let sanitizedExec = stripFieldCodes(app.exec).strip()
+        var key = sanitizedExec.toLowerAscii
+        if key.len == 0:
+          key = getBaseExec(app.exec).toLowerAscii
+        if key.len == 0:
+          key = app.name.toLowerAscii
+        if not dedup.hasKey(key) or (app.hasIcon and not dedup[key].hasIcon):
+          dedup[key] = app
+
+  allApps = dedup.values.toSeq
+  allApps.sort(proc(a, b: DesktopApp): int = cmpIgnoreCase(a.name, b.name))
+  allAppsIndex = initTable[string, DesktopApp](allApps.len * 2)
+  for app in allApps: allAppsIndex[app.name] = app
+  filteredApps = @[]
+  matchSpans = @[]
+  try:
+    createDir(cacheDir)
+    writeFile(cacheFile, pretty(%CacheData(formatVersion: CacheFormatVersion,
+                                           usrMtime: usrM,
+                                           localMtime: locM,
+                                           flatpakUserMtime: flatpakUserM,
+                                           flatpakSystemMtime: flatpakSystemM,
+                                           apps: allApps)))
+  except:
+    echo "Warning: cache not saved."
