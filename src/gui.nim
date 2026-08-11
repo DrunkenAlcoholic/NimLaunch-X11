@@ -302,8 +302,11 @@ proc initGui*() =
       discard XSetInputFocus(display, window, RevertToParent, CurrentTime)
 
     gc = XCreateGC(display, window, 0, nil)
+
+  doubleBuffer = XCreatePixmap(display, window, cuint(config.winWidth), cuint(config.winMaxHeight), DefaultDepth(display, screen).cuint)
+
   xftDraw = XftDrawCreate(
-    display, window,
+    display, doubleBuffer,
     DefaultVisual(display, screen),
     DefaultColormap(display, screen)
   )
@@ -313,23 +316,26 @@ proc initGui*() =
   initInputContext()
 
 # ── Drawing routines ────────────────────────────────────────────────────
-proc drawText*(txt: string; x, y: cint; spans: seq[(int, int)] = @[];
+proc drawText*(txt: string; x, boxY: cint; spans: seq[(int, int)] = @[];
     selected = false; iconPath = "") =
   ## Draw a single line with optional highlighted spans.
   let bgCol = if selected: xftColorHighlightBg else: xftColorBg
   discard XSetForeground(display, gc, bgCol)
   discard XFillRectangle(
-    display, window, gc,
-    x, y - font.ascent,
+    display, doubleBuffer, gc,
+    x, boxY,
     cuint(config.winWidth),
     cuint(config.lineHeight)
   )
+
+  let textTop = boxY + (config.lineHeight.cint - (font.ascent + font.descent)) div 2
+  let textBaseline = textTop + font.ascent
 
   var textX = x
   when defined(icons):
     if iconPath.len > 0:
       let iconSize = max(8, min(config.lineHeight - 4, 24)).cint
-      let iconY = y - font.ascent + ((config.lineHeight.cint - iconSize) div 2)
+      let iconY = boxY + ((config.lineHeight.cint - iconSize) div 2)
       if drawIcon(iconPath, x, iconY, iconSize):
         textX = x + iconSize + 8
 
@@ -340,7 +346,7 @@ proc drawText*(txt: string; x, y: cint; spans: seq[(int, int)] = @[];
       xftDraw,
       cast[PXftColor](addr baseFg),
       font,
-      textX, y,
+      textX, textBaseline,
       cast[PFcChar8](txt[0].addr),
       txt.len.cint
     )
@@ -358,7 +364,7 @@ proc drawText*(txt: string; x, y: cint; spans: seq[(int, int)] = @[];
       xftDraw,
       cast[PXftColor](addr xftColorMatchFg),
       boldFont,
-      xPos, y,
+      xPos, textBaseline,
       cast[PFcChar8](seg[0].addr),
       seg.len.cint
     )
@@ -367,7 +373,7 @@ proc redrawWindow*() =
   ## Full-frame redraw (prompt, list, overlay, border).
   discard XSetForeground(display, gc, config.bgColor)
   discard XFillRectangle(
-    display, window, gc,
+    display, doubleBuffer, gc,
     0, 0,
     cuint(config.winWidth),
     cuint(config.winMaxHeight)
@@ -375,14 +381,14 @@ proc redrawWindow*() =
 
   let commandActive = config.vimMode and vimCommandActive
 
-  var y: cint = font.ascent + 8
+  var boxY: cint = 8
   if not config.vimMode:
     let promptLine = config.prompt & inputText & (
         if benchMode: "" else: config.cursor)
-    drawText(promptLine, 12, y)
-    y += config.lineHeight.cint + 6
+    drawText(promptLine, 12, boxY)
+    boxY += config.lineHeight.cint + 6
   else:
-    y += 2
+    boxY += 2
 
   let total = filteredApps.len
   let maxRows = config.maxVisibleItems
@@ -393,10 +399,10 @@ proc redrawWindow*() =
     let row = filteredApps[idx]
     let selected = (idx == selectedIndex)
     when defined(icons):
-      drawText(row.text, 12, y, matchSpans[idx], selected, row.iconPath)
+      drawText(row.text, 12, boxY, matchSpans[idx], selected, row.iconPath)
     else:
-      drawText(row.text, 12, y, matchSpans[idx], selected)
-    y += config.lineHeight.cint
+      drawText(row.text, 12, boxY, matchSpans[idx], selected)
+    boxY += config.lineHeight.cint
 
   ## Command line (bottom)
   if commandActive:
@@ -405,7 +411,7 @@ proc redrawWindow*() =
     if barTop < 0: barTop = 0
     discard XSetForeground(display, gc, config.highlightBgColor)
     discard XFillRectangle(
-      display, window, gc,
+      display, doubleBuffer, gc,
       0, barTop.cint,
       cuint(config.winWidth),
       cuint(barHeight)
@@ -439,10 +445,19 @@ proc redrawWindow*() =
       themeHeight = overlayFont.ascent + overlayFont.descent + clockMargin
     let cx = config.winWidth - int(cw) - clockMargin
     let cy = font.ascent + clockMargin + themeHeight
+    if not overlayActive:
+      discard XSetForeground(display, gc, xftColorBg)
+      discard XFillRectangle(
+        display, doubleBuffer, gc,
+        cint(cx), cint(cy - font.ascent),
+        cuint(cw),
+        cuint(config.lineHeight)
+      )
+
     XftDrawStringUtf8(
       xftDraw,
-      cast[PXftColor](addr xftColorFg),
-      overlayFont,
+      cast[PXftColor](addr xftColorMatchFg),
+      font,
       cint(cx), cint(cy),
       cast[PFcChar8](nowStr[0].addr),
       nowStr.len.cint
@@ -459,15 +474,25 @@ proc redrawWindow*() =
       nowStr.len.cint
     )
 
+
+
   ## Border
   if config.borderWidth > 0:
     discard XSetForeground(display, gc, config.borderColor)
     for i in 0 ..< config.borderWidth:
       discard XDrawRectangle(
-        display, window, gc,
+        display, doubleBuffer, gc,
         i.cint, i.cint,
         cuint(config.winWidth - 1 - i * 2),
         cuint(config.winMaxHeight - 1 - i * 2)
       )
+
+  ## Blit the double buffer to the actual window
+  discard XCopyArea(
+    display, doubleBuffer, window, gc,
+    0, 0,
+    cuint(config.winWidth), cuint(config.winMaxHeight),
+    0, 0
+  )
 
   discard XFlush(display)

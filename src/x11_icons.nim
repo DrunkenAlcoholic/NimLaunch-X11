@@ -27,7 +27,7 @@ proc initIconRenderer*() =
   imlib_context_set_display(cast[pointer](display))
   imlib_context_set_visual(cast[pointer](DefaultVisual(display, screen)))
   imlib_context_set_colormap(DefaultColormap(display, screen))
-  imlib_context_set_drawable(window.Drawable)
+  imlib_context_set_drawable(doubleBuffer.Drawable)
 
 proc drawIcon*(path: string; x, y, size: cint): bool =
   ## Draw icon top-left at x/y scaled to size. Returns false on load failure.

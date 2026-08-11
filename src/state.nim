@@ -10,6 +10,8 @@
 
 import std/tables
 import x11/[xlib, x] ## PDisplay, Window, GC, culong
+when defined(icons):
+  import icon_resolver
 
 # ── Data structures ─────────────────────────────────────────────────────
 type
@@ -131,17 +133,73 @@ type
 var
   display*: PDisplay
   window*: Window
+  doubleBuffer*: Pixmap
   gc*: GC
   screen*: cint
   inputMethod*: XIM
   inputContext*: XIC
 
+const
+  SearchDebounceMs* = 240
+  SearchFdCap*      = 800
+  SearchShowCap*    = 250
+  CacheFormatVersion* = 6
+
+type
+  CmdKind* = enum
+    ckNone,
+    ckTheme,
+    ckConfig,
+    ckSearch,
+    ckMenu,
+    ckShortcut,
+    ckRun
+
+let iconAliases* = {
+  "code": "visual-studio-code",
+  "codium": "vscodium",
+  "nvim": "nvim",
+  "neovide": "nvim",
+  "kitty": "kitty",
+  "wezterm": "com.github.wez.wezterm",
+  "alacritty": "Alacritty",
+  "gnome-terminal": "utilities-terminal",
+  "foot": "terminal",
+  "firefox": "firefox",
+  "chromium": "chromium",
+  "google-chrome": "google-chrome",
+  "brave-browser": "brave-browser",
+  "opera": "opera",
+  "vivaldi": "vivaldi",
+  "edge": "microsoft-edge",
+  "discord": "discord",
+  "steam": "steam",
+  "lutris": "lutris",
+  "spotify": "spotify",
+  "vlc": "vlc",
+  "mpv": "mpv",
+  "nautilus": "org.gnome.Nautilus",
+  "dolphin": "dolphin",
+  "thunar": "Thunar",
+  "pcmanfm": "system-file-manager",
+  "gimp": "gimp",
+  "inkscape": "inkscape"
+}.toTable
+
 # ── Runtime state ───────────────────────────────────────────────────────
 var
   config*: Config                   ## parsed launcher configuration
+  currentThemeIndex*: int = 0       ## active theme index in `themeList`
+  configFilesLoaded*: bool = false
+  configFilesCache*: seq[DesktopApp] = @[]
   allApps*: seq[DesktopApp]
   allAppsIndex*: Table[string, DesktopApp]
   filteredApps*: seq[DisplayRow]    ## full list & current view slice
+  actions*: seq[Action]             ## transient list for the UI
+  lastInputChangeMs*: int64 = 0     ## updated on each keystroke
+  lastSearchBuildMs*: int64 = 0     ## idle-loop guard to rebuild after debounce
+  lastSearchQuery*: string = ""     ## cache key for s: queries
+  lastSearchResults*: seq[string] = @[] ## cached paths for narrowing queries
   inputText*: string                ## raw user input
   selectedIndex*: int               ## index into `filteredApps`
   dmenuMode*: bool = false          ## `--dmenu` flag
@@ -165,6 +223,11 @@ var
   themePreviewActive*: bool = false   ## true while :t list is temporarily previewing themes
   themePreviewBaseTheme*: string
   themePreviewCurrent*: string
+
+when defined(icons):
+  var
+    iconIndex*: IconIndex
+    iconPathCache* = initTable[string, string]()
 
 # ── Constants ───────────────────────────────────────────────────────────
 const
